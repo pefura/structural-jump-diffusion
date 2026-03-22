@@ -22,10 +22,7 @@ using a structural Merton Jump-Diffusion framework.
 st.sidebar.header("Patient Admission Data")
 age = st.sidebar.number_input("Age (Years)", min_value=15, max_value=100, value=33)
 
-# Inputs for Adjusted BMI Calculation
 sex = st.sidebar.radio("Sex", ["Male", "Female"])
-
-# Using format="%.1f" ensures the use of a full stop (.) for decimals
 weight = st.sidebar.number_input("Admission Weight (kg)", 
                                  min_value=20.0, 
                                  max_value=150.0, 
@@ -41,7 +38,6 @@ tb_class = st.sidebar.selectbox("TB Classification",
 hosp_status = st.sidebar.radio("Initial Management", ["Outpatient", "Hospitalized"])
 
 # --- ADJUSTED BMI CALCULATION LOGIC ---
-# Standardized height per study protocol: 1.70m for men, 1.60m for women
 height = 1.70 if sex == "Male" else 1.60
 adjusted_bmi = weight / (height ** 2)
 
@@ -53,7 +49,6 @@ if st.sidebar.button("Run Risk Assessment", type="primary"):
     sigma_i = PARAMS["sigma_base"] * (1.4463 if hiv_status == "Positive" else 1.0)
     lambda_i = PARAMS["lambda_base"] * (4.2626 if hosp_status == "Hospitalized" else 1.0)
     
-    # Aggregation
     sigma_tot = np.sqrt(sigma_i**2 + lambda_i * PARAMS["delta"]**2)
     mu_adj = mu_i - lambda_i * (np.exp(PARAMS["delta"]**2 / 2) - 1)
     
@@ -62,9 +57,18 @@ if st.sidebar.button("Run Risk Assessment", type="primary"):
                 (sigma_tot * np.sqrt(PARAMS["T_hor"]))
     risk_pct = norm.cdf(-dtd_score) * 100 
 
-    # 3. TOP METRICS TILES
+    # 3. DETERMINE COLOR AND TRIAGE LEVEL
+    if risk_pct > 10.0:
+        level, color, msg = "LEVEL 1: CRITICAL RISK", "#d9534f", "Immediate intensive clinical and nutritional intervention required."
+    elif risk_pct >= 5.0:
+        level, color, msg = "LEVEL 2: HIGH RISK", "#f0ad4e", "Close monitoring of physiological parameters and follow-up recommended."
+    elif risk_pct >= 2.5:
+        level, color, msg = "LEVEL 3: MODERATE RISK", "#3498db", "Regular monitoring of health capital and BMI progression advised."
+    else:
+        level, color, msg = "LEVEL 4: STABLE / LOW RISK", "#5cb85c", "High biological solvency. Follow standard treatment protocols."
+
+    # 4. TOP METRICS TILES
     col1, col2, col3, col4 = st.columns(4)
-    # Specified Label: Adjusted BMI (kg/m2)
     col1.metric("Adjusted BMI (kg/m²)", f"{adjusted_bmi:.1f}")
     col2.metric("DtD Score", f"{dtd_score:.2f}")
     col3.metric("Death Risk", f"{risk_pct:.1f}%")
@@ -73,10 +77,13 @@ if st.sidebar.button("Run Risk Assessment", type="primary"):
     # --- VISUAL SCALE SECTION ---
     st.markdown("## Physiological Solvency Scale (DtD)")
 
+    # The bar width maps 0-3.5 DtD range to 0-100%
     pos = min(max((dtd_score / 3.5) * 100, 0), 100)
+    
+    # DYNAMIC COLOR: The 'background-color' of the inner div now uses the 'color' variable
     st.markdown(f"""
     <div style="width: 100%; background-color: #eee; border-radius: 15px; height: 35px; border: 1px solid #ccc; overflow: hidden; position: relative;">
-      <div style="width: {pos}%; background-color: #2c7bb6; height: 100%; border-radius: 15px; transition: width 1s; display: flex; align-items: center; justify-content: flex-end;">
+      <div style="width: {pos}%; background-color: {color}; height: 100%; border-radius: 15px; transition: width 1s; display: flex; align-items: center; justify-content: flex-end;">
         <span style="color: white; font-weight: bold; padding-right: 15px;">{dtd_score:.2f}</span>
       </div>
     </div>
@@ -95,16 +102,7 @@ if st.sidebar.button("Run Risk Assessment", type="primary"):
     
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # 4. TRIAGE BOX
-    if risk_pct > 10.0:
-        level, color, msg = "LEVEL 1: CRITICAL RISK", "#d9534f", "Immediate intensive clinical and nutritional intervention required."
-    elif risk_pct >= 5.0:
-        level, color, msg = "LEVEL 2: HIGH RISK", "#f0ad4e", "Close monitoring of physiological parameters and follow-up recommended."
-    elif risk_pct >= 2.5:
-        level, color, msg = "LEVEL 3: MODERATE RISK", "#3498db", "Regular monitoring of health capital and BMI progression advised."
-    else:
-        level, color, msg = "LEVEL 4: STABLE / LOW RISK", "#5cb85c", "High biological solvency. Follow standard treatment protocols."
-
+    # 5. TRIAGE BOX
     st.markdown(f"""
     <div style="background-color:{color}; color:white; padding:20px; border-radius:10px;">
         <h2 style="margin:0;">{level}</h2>
