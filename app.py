@@ -15,7 +15,7 @@ st.set_page_config(page_title="DtD-TB Risk Assessment", page_icon="🩺", layout
 st.title("🩺 Distance-to-Death (DtD)-TB: Individualized Mortality Risk Tool")
 st.markdown("""
 This application calculates a patient's **Distance-to-Death (DtD)** and 240-day mortality risk 
-using a structural Merton Jump-Diffusion framework in tuberculosis (TB) patiens.
+using a structural Merton Jump-Diffusion framework in tuberculosis (TB) patients.
 """)
 
 # --- SIDEBAR: PATIENT DATA INPUT ---
