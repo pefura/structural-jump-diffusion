@@ -583,8 +583,8 @@ p <- ggplot() +
   )
 
 # Save the plot
-ggsave("/Users/pefura-yone/Documents/FMSB/Articles/Stochastic_modeling_TB/calibration_plot_final_legend.png", 
-       plot = p, width = 9, height = 7, dpi = 300)
+# ggsave("/Users/pefura-yone/Documents/FMSB/Articles/Stochastic_modeling_TB/calibration_plot_final_legend.png", 
+#       plot = p, width = 9, height = 7, dpi = 300)
 
 # Display
 print(p)
@@ -654,6 +654,6 @@ p_grad <- ggplot(mort_data, aes(x = Quartile, y = Rate, fill = Quartile)) +
 # --- Final Assembly ---
 final_fig2 <- (p_dist | p_scatter) / (p_km | p_grad) + plot_layout(heights = c(1, 1))
 
-ggsave("Figure2_DtD_Validation_Final.png", plot = final_fig2, width = 10, height = 9, dpi = 300)
+#ggsave("Figure2_DtD_Validation_Final.png", plot = final_fig2, width = 10, height = 9, dpi = 300)
 print(final_fig2)
 ```
