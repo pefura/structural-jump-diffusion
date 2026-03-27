@@ -114,7 +114,7 @@ if calculate_btn:
     st.markdown(f"""
         <div style="background-color:{col}; color:white; padding:25px; border-radius:15px; text-align:center;">
             <div class="triage-lvl">{lvl}</div>
-            <div class="triage-risk">Risk of Death: {risk_of_death:.2f}%</div>
+            <div class="triage-risk">Risk of Death: {risk_of_death:.1f}%</div>
             <p style="font-size:1.1rem; opacity: 0.9; margin: 0;">{msg}</p>
         </div>
         <div class="scale-labels">
