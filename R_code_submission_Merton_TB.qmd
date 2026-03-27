@@ -1,0 +1,659 @@
+---
+title: "Untitled"
+format: html
+editor: visual
+---
+
+## A structural Merton jump-diffusion framework for survival analysis: Modeling biological solvency and distance-to-death (DtD) in tuberculosis
+
+```{r}
+############################################################
+## 0. PACKAGES
+############################################################
+library(dplyr)
+library(survival)
+library(ggplot2)
+
+library(knitr)
+library(kableExtra)
+
+library(MASS)
+library(numDeriv)
+
+```
+
+## 1. Importing data
+
+```{r}
+## IMPORT DATA
+path <- "https://raw.githubusercontent.com/pefura/structural-jump-diffusion/refs/heads/main/synthetic_tb_data.csv"
+df_clean2 <- read.csv(path)
+head(df_clean2)
+```
+
+## 2. Data preparation, Parameters, Merton and Extended Cox
+
+```{r}
+# Random fixed
+set.seed(123)
+
+############################################################
+## 1. DATA PREPARATION & TRAIN / TEST SPLIT
+############################################################
+
+# Define categorical and numeric variables
+cat_var <- c("issue_traitement", "lieusuivi",
+             "TB_class", "HIV_status")
+num_var <- c("surv_time_day", "agecode", "BMI")
+
+# Convert variables
+df_clean2[cat_var] <- lapply(df_clean2[cat_var], factor)
+df_clean2[num_var] <- lapply(df_clean2[num_var], as.numeric)
+
+# Define survival variables
+df_clean2 <- df_clean2 %>%
+  mutate(
+    Duration = surv_time_day,
+    Status   = ifelse(issue_traitement == "death", 1, 0)
+  )
+
+# Train / test split
+n <- nrow(df_clean2)
+idx <- sample(seq_len(n), size = 0.7 * n)
+train <- df_clean2[idx, ]
+test  <- df_clean2[-idx, ]
+
+############################################################
+## 2. RECODING CLINICAL VARIABLES – TB REFERENCE EXPLICIT
+############################################################
+
+# Ensure "smear positive pulmonary" is reference
+train <- train %>%
+  mutate(
+    VIH      = factor(HIV_status, levels = c("negative", "positive")),
+    Hospit   = factor(lieusuivi, levels = c("outpatient", "hospitalized")),
+    TB_class = factor(
+      TB_class,
+      levels = c("smear positive pulmonary",  # REFERENCE
+                 "extrapulmonary",
+                 "smear negative pulmonary")
+    )
+  )
+
+test <- test %>%
+  mutate(
+    VIH      = factor(HIV_status, levels = c("negative", "positive")),
+    Hospit   = factor(lieusuivi, levels = c("outpatient", "hospitalized")),
+    TB_class = factor(
+      TB_class,
+      levels = c("smear positive pulmonary",  # REFERENCE
+                 "extrapulmonary",
+                 "smear negative pulmonary")
+    )
+  )
+
+############################################################
+## 3. MERTON NEGATIVE LOG-LIKELIHOOD (RAW AGE & BMI)
+############################################################
+
+merton_nll <- function(params, data){
+
+  mu_base     <- params[1]
+  beta_age    <- params[2]
+  sigma_base  <- params[3]
+  lambda_base <- params[4]
+  K           <- params[5]
+  delta       <- params[6]
+
+  n_TB <- length(levels(data$TB_class)) - 1
+  gamma_TB <- params[7:(6 + n_TB)]
+
+  coeff_VIH  <- params[7 + n_TB]
+  coeff_Hosp <- params[8 + n_TB]
+
+  T_hor <- 240 / 365
+
+  # Personalized drift (RAW AGE)
+  mu_i <- mu_base + beta_age * data$agecode
+  for (l in seq_len(n_TB)) {
+    mu_i <- mu_i + gamma_TB[l] *
+      (data$TB_class == levels(data$TB_class)[l + 1])
+  }
+
+  # Volatility and jump intensity
+  sigma_i  <- sigma_base * ifelse(data$VIH == "positive", coeff_VIH, 1)
+  lambda_i <- lambda_base * ifelse(data$Hospit == "hospitalized", coeff_Hosp, 1)
+
+  # Aggregated dynamics
+  sigma_tot <- sqrt(sigma_i^2 + lambda_i * delta^2)
+  mu_adj    <- mu_i - lambda_i * (exp(delta^2 / 2) - 1)
+
+  # DTD score (RAW BMI)
+  DTD <- (log(data$BMI / K) +
+          (mu_adj - 0.5 * sigma_tot^2) * T_hor) /
+         (sigma_tot * sqrt(T_hor))
+
+  prob_surv <- pnorm(DTD)
+  prob_surv <- pmax(pmin(prob_surv, 0.999), 0.001)
+
+  nll <- -sum(data$Status * log(1 - prob_surv) +
+              (1 - data$Status) * log(prob_surv))
+
+  return(nll)
+}
+
+############################################################
+## 4. PARAMETER OPTIMIZATION
+############################################################
+
+n_TB <- length(levels(train$TB_class)) - 1
+
+init_params <- c(
+  mu_base = 0.05,
+  beta_age = -0.01,
+  sigma_base = 0.25,
+  lambda_base = 0.05,
+  K = 18,
+  delta = 0.15,
+  rep(0.02, n_TB),
+  coeff_VIH = 1.5,
+  coeff_Hosp = 3
+)
+
+fit <- optim(
+  par = init_params,
+  fn = merton_nll,
+  data = train,
+  method = "L-BFGS-B",
+  lower = c(-1, -0.2, 0.05, 0.001, 15, 0.05, rep(-1, n_TB), 0.5, 1),
+  upper = c(10,  0.1,  2,    2,    30,  2,    rep(1, n_TB), 5,   10),
+  control = list(maxit = 10000)
+)
+
+if(fit$convergence == 0){
+  cat("Successful convergence.\n")
+} else {
+  stop("Optimization did not converge")
+}
+
+opt_params <- fit$par
+
+# Annotate gamma_TB coefficients
+gamma_TB <- opt_params[7:(6 + n_TB)]
+tb_levels <- levels(train$TB_class)[-1]  # exclude reference
+names(gamma_TB) <- tb_levels
+
+cat("\nParamètres Merton optimisés :\n")
+print(opt_params)
+cat("\nGamma_TB coefficients (relative to 'smear positive pulmonary'):\n")
+print(gamma_TB)
+
+############################################################
+## 5. DTD COMPUTATION
+############################################################
+
+calc_DTD <- function(df, params){
+
+  mu_base     <- params[1]
+  beta_age    <- params[2]
+  sigma_base  <- params[3]
+  lambda_base <- params[4]
+  K           <- params[5]
+  delta       <- params[6]
+
+  n_TB <- length(levels(df$TB_class)) - 1
+  gamma_TB <- params[7:(6 + n_TB)]
+  coeff_VIH <- params[7 + n_TB]
+  coeff_Hosp <- params[8 + n_TB]
+
+  T_hor <- 240 / 365
+
+  mu_i <- mu_base + beta_age * df$agecode
+  for (l in seq_len(n_TB)) {
+    mu_i <- mu_i + gamma_TB[l] *
+      (df$TB_class == levels(df$TB_class)[l + 1])
+  }
+
+  sigma_i  <- sigma_base * ifelse(df$VIH == "positive", coeff_VIH, 1)
+  lambda_i <- lambda_base * ifelse(df$Hospit == "hospitalized", coeff_Hosp, 1)
+
+  sigma_tot <- sqrt(sigma_i^2 + lambda_i * delta^2)
+  mu_adj    <- mu_i - lambda_i * (exp(delta^2 / 2) - 1)
+
+  DTD <- (log(df$BMI / K) +
+          (mu_adj - 0.5 * sigma_tot^2) * T_hor) /
+         (sigma_tot * sqrt(T_hor))
+
+  list(
+    DTD_score = DTD,
+    prob_surv = pnorm(DTD)
+  )
+}
+
+train_res <- calc_DTD(train, opt_params)
+test_res  <- calc_DTD(test, opt_params)
+
+train$DTD_score <- train_res$DTD_score
+train$prob_surv <- train_res$prob_surv
+
+test$DTD_score <- test_res$DTD_score
+test$prob_surv <- test_res$prob_surv
+
+############################################################
+## 6. EXTENDED COX MODEL
+############################################################
+
+train <- train %>%
+  mutate(
+    VIH_pos = as.numeric(VIH == "positive"),
+    Hospit_hosp = as.numeric(Hospit == "hospitalized")
+  )
+
+test <- test %>%
+  mutate(
+    VIH_pos = as.numeric(VIH == "positive"),
+    Hospit_hosp = as.numeric(Hospit == "hospitalized")
+  )
+
+cox_ext <- coxph(
+  Surv(Duration, Status) ~ agecode + BMI + VIH_pos +
+    Hospit_hosp + TB_class +
+    tt(VIH_pos) + tt(Hospit_hosp),
+  data = train,
+  tt = function(x, t, ...) x * log(t + 1)
+)
+
+############################################################
+## 7. C-INDEX WITH BOOTSTRAP
+############################################################
+
+calc_c <- function(s, score){
+  c <- concordance(s ~ score)$concordance
+  if(c < 0.5) c <- 1 - c
+  c
+}
+
+B <- 1000
+set.seed(123)
+
+c_m <- c_c <- delta_c <- numeric(B)
+surv_test <- Surv(test$Duration, test$Status)
+
+for(b in 1:B){
+  idx_b <- sample(seq_len(nrow(test)), replace = TRUE)
+  surv_b <- Surv(test$Duration[idx_b], test$Status[idx_b])
+
+  c_m[b] <- calc_c(surv_b, -test$DTD_score[idx_b])
+  c_c[b] <- calc_c(
+    surv_b,
+    predict(cox_ext, newdata = test[idx_b, ], type = "lp")
+  )
+
+  delta_c[b] <- c_m[b] - c_c[b]
+}
+
+############################################################
+## 8. RESULTS SUMMARY
+############################################################
+
+cat("\nC-index Merton (95% CI):",
+    round(mean(c_m), 3),
+    quantile(c_m, c(0.025, 0.975)), "\n")
+
+cat("C-index Cox (95% CI):",
+    round(mean(c_c), 3),
+    quantile(c_c, c(0.025, 0.975)), "\n")
+
+cat("ΔC (Merton − Cox):",
+    round(mean(delta_c), 3),
+    quantile(delta_c, c(0.025, 0.975)), "\n")
+
+cat("Bootstrap p-value:",
+    min(mean(delta_c <= 0) * 2, 1), "\n")
+
+############################################################
+## 9. DTD SCORE SUMMARIES
+############################################################
+
+cat("\nTrain DTD score summary:\n")
+print(summary(train$DTD_score))
+
+cat("\nTest DTD score summary:\n")
+print(summary(test$DTD_score))
+
+cat("\nTrain probability of survival summary:\n")
+print(summary(train$prob_surv))
+
+cat("\nTest probability of survival summary:\n")
+print(summary(test$prob_surv))
+```
+
+## 3. Merton parameters
+
+```{r}
+############################################################
+## AUTOMATIC MERTON PARAMETER TABLE
+############################################################
+
+# Number of TB coefficients
+n_TB <- length(levels(train$TB_class)) - 1
+tb_levels <- levels(train$TB_class)[-1]  # exclude reference
+
+# Build parameter names (mathematical + readable)
+param_names <- c(
+  "$\\mu_0$ (baseline drift)",
+  "$\\beta_{age}$ (age effect)",
+  "$\\sigma_0$ (baseline volatility)",
+  "$\\lambda_0$ (baseline jump intensity)",
+  "$K$ (nutritional threshold)",
+  "$\\delta$ (jump size)",
+  paste0("$\\gamma_{TB}$: ", tb_levels),
+  "$\\theta_{HIV}$ (HIV multiplier)",
+  "$\\theta_{Hosp}$ (hospitalization multiplier)"
+)
+
+# Create table
+merton_table <- data.frame(
+  Parameter = param_names,
+  Estimate  = round(opt_params, 4)
+)
+
+# Add reference note
+attr(merton_table, "note") <- 
+  "TB reference category: smear positive pulmonary"
+
+kable(
+  merton_table,
+  format = "html",
+  caption = "Optimized Merton model parameters",
+  escape = FALSE
+) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = FALSE
+  ) %>%
+  footnote(
+    general = attr(merton_table, "note")
+  )
+
+```
+
+## **4. Optimized structural parameters and robust statistical inference of the Merton jump-diffusion model**
+
+```{r}
+################################################################################
+## 10. ROBUST STATISTICAL INFERENCE (FOR 10-PARAMETER MODEL)
+################################################################################
+
+# 1. Calculate a precise Hessian matrix using Richardson extrapolation
+# This is more reliable for p-values than the default optim output
+hess_precise <- numDeriv::hessian(func = merton_nll, x = fit$par, data = train)
+
+# 2. Robust matrix inversion (Moore-Penrose Pseudo-inverse)
+# This handles numerical instability often found in SDE models
+var_cov <- ginv(hess_precise)
+
+# 3. Calculation of Standard Errors
+# We use abs() to ensure positive values before the square root
+se <- sqrt(abs(diag(var_cov)))
+
+# 4. Statistical Inference (Wald tests)
+# Calculate z-scores and two-sided p-values assuming asymptotic normality
+z_val <- fit$par / se
+p_val <- 2 * (1 - pnorm(abs(z_val)))
+
+# 5. Define Parameter Names (Matching your merton_nll function mapping)
+# 1:mu_base, 2:age, 3:sigma, 4:lambda, 5:K, 6:delta, 7:EPTB, 8:SNPTB, 9:VIH, 10:Hosp
+param_names <- c("mu_base", "beta_age", "sigma_base", "lambda_base", "K", "delta", 
+                 "gamma_EPTB", "gamma_SNPTB", "coeff_VIH", "coeff_Hosp")
+
+# 6. Construct Results Table
+results_merton <- data.frame(
+  Parameter = param_names,
+  Estimate  = round(fit$par, 4),
+  Std_Error = round(se, 4),
+  z_value   = round(z_val, 2),
+  p_value   = format.pval(p_val, digits = 3, eps = 0.001)
+)
+
+# 7. Print the final summary table
+cat("\n--- Optimized Merton Parameters (10-Parameter Model) ---\n")
+print(results_merton)
+```
+
+## 5. Full model vs reduced model
+
+```{r}
+################################################################################
+## MODEL COMPARISON: FULL MODEL (JUMP-DIFFUSION) VS. REDUCED MODEL (PURE DIFFUSION)
+################################################################################
+
+# 1. Define the Reduced Model (Pure Diffusion - NO JUMPS)
+# This model assumes health trajectories are continuous without acute shocks.
+merton_nll_reduced <- function(params, data){
+  mu_base     <- params[1]
+  beta_age    <- params[2]
+  sigma_base  <- params[3]
+  K           <- params[4]
+  
+  n_TB        <- length(levels(data$TB_class)) - 1
+  gamma_TB    <- params[5:(4 + n_TB)]
+  coeff_VIH   <- params[5 + n_TB]
+
+  T_hor <- 240 / 365
+
+  # Personalized Drift (mu_i)
+  mu_i <- mu_base + beta_age * data$agecode
+  for (l in seq_len(n_TB)) {
+    mu_i <- mu_i + gamma_TB[l] * (data$TB_class == levels(data$TB_class)[l + 1])
+  }
+
+  # Pure Volatility (No Jump components: Lambda * Delta excluded)
+  sigma_i <- sigma_base * ifelse(data$VIH == "positive", coeff_VIH, 1)
+
+  # Simplified Distance-to-Death (DtD) score (Standard Diffusion/Black-Scholes type)
+  DTD <- (log(data$BMI / K) + (mu_i - 0.5 * sigma_i^2) * T_hor) / (sigma_i * sqrt(T_hor))
+
+  # Calculate Survival Probability
+  prob_surv <- pnorm(DTD)
+  prob_surv <- pmax(pmin(prob_surv, 0.999), 0.001)
+
+  # Calculate Negative Log-Likelihood
+  nll <- -sum(data$Status * log(1 - prob_surv) + (1 - data$Status) * log(prob_surv))
+  return(nll)
+}
+
+# 2. Optimization of the Reduced Model
+init_params_red <- c(
+  mu_base = 0.05, beta_age = -0.01, sigma_base = 0.25, 
+  K = 18, rep(0.02, n_TB), coeff_VIH = 1.5
+)
+
+fit_red <- optim(
+  par = init_params_red,
+  fn = merton_nll_reduced,
+  data = train,
+  method = "L-BFGS-B",
+  lower = c(-1, -0.2, 0.05, 15, rep(-1, n_TB), 0.5),
+  upper = c(10,  0.1,  2,   30, rep(1, n_TB), 5),
+  control = list(maxit = 10000)
+)
+
+# 3. Calculate Model Selection Criteria and Likelihood Ratio Test (LRT)
+k_full   <- length(fit$par)   # Number of parameters in Full Model
+k_red    <- length(fit_red$par) # Number of parameters in Reduced Model
+nll_full <- fit$value         # NLL of Full Model (previously calculated)
+nll_red  <- fit_red$value     # NLL of Reduced Model
+
+# Information Criteria
+aic_red  <- 2 * k_red + 2 * nll_red
+bic_red  <- log(nrow(train)) * k_red + 2 * nll_red
+
+# Likelihood Ratio Test Statistic
+# Calculated as 2 * (difference in log-likelihoods)
+lrt_stat <- 2 * (nll_red - nll_full) 
+df_diff  <- k_full - k_red    # Degrees of freedom difference
+p_lrt    <- pchisq(lrt_stat, df = df_diff, lower.tail = FALSE)
+
+# 4. Display Comparative Results Summary
+cat("\n================================================")
+cat("\n           MODEL COMPARISON SUMMARY")
+cat("\n================================================")
+cat("\nFULL MODEL (Jump-Diffusion):")
+cat("\n  - AIC :", round(4596.92, 2)) 
+cat("\n  - NLL :", round(nll_full, 2))
+cat("\n")
+cat("\nREDUCED MODEL (Pure Diffusion):")
+cat("\n  - AIC :", round(aic_red, 2))
+cat("\n  - NLL :", round(nll_red, 2))
+cat("\n------------------------------------------------")
+cat("\nLikelihood Ratio Test (LRT):")
+cat("\n  - Chi-squared stat :", round(lrt_stat, 4))
+cat("\n  - Degrees of freedom :", df_diff)
+cat("\n  - p-value :", format.pval(p_lrt, eps = 0.001))
+cat("\n------------------------------------------------")
+
+if(p_lrt < 0.05) {
+  cat("\nDECISION: The FULL MODEL is statistically superior.")
+  cat("\nJustification: Jump components contribute significant explanatory power.")
+} else {
+  cat("\nDECISION: The REDUCED MODEL is preferred (Parsimony).")
+  cat("\nJustification: Jumps do not significantly improve model fit.")
+}
+cat("\n================================================\n")
+```
+
+## 6. Graphics
+
+```{r}
+# ==============================================================================
+# 3. RESULTS & VISUALIZATION (UPDATED: START AT 0 & BOLD AXES)
+# ==============================================================================
+
+# Determine a reasonable upper limit for the plot (e.g., 0.25 or 0.30)
+max_val <- max(c(calib_merton$mean_pred, calib_merton$surv_obs, 
+                 calib_cox$mean_pred, calib_cox$surv_obs), na.rm = TRUE) * 1.1
+
+p <- ggplot() +
+  # Reference line (Perfect Calibration)
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "black", alpha = 0.6) +
+  
+  # Merton (Blue)
+  geom_line(data = calib_merton, aes(x = mean_pred, y = surv_obs, color = "Merton jump-diffusion"), size = 1.2) +
+  geom_point(data = calib_merton, aes(x = mean_pred, y = surv_obs, color = "Merton jump-diffusion"), size = 3) +
+  
+  # Cox (Red)
+  geom_line(data = calib_cox, aes(x = mean_pred, y = surv_obs, color = "Extended Cox"), size = 1.2) +
+  geom_point(data = calib_cox, aes(x = mean_pred, y = surv_obs, color = "Extended Cox"), size = 3) +
+  
+  # Aesthetics
+  scale_color_manual(values = c("Merton jump-diffusion" = "blue", "Extended Cox" = "red")) +
+  
+  # FORCING AXES TO START AT 0
+  # expand = c(0,0) removes the padding R usually adds around the 0 point
+  scale_x_continuous(limits = c(0, max_val), expand = c(0, 0)) +
+  scale_y_continuous(limits = c(0, max_val), expand = c(0, 0)) +
+  
+  # Ensure the plot is a perfect square so the 45-degree line is accurate
+  coord_equal() +
+  
+  labs(
+    #title = paste("Calibration Plot at", T_target, "Days"),
+    #subtitle = paste0("GND Chi2: Merton=", round(GND_chi_merton, 1), " vs Cox=", round(GND_chi_cox, 1)),
+    x = "Predicted probability of death",
+    y = "Observed probability of death",
+    color = "Model"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    # BOLDING THE MAIN AXES TITLES
+    axis.title.x = element_text(size = 12, margin = margin(t = 10)),
+    axis.title.y = element_text(size = 12, margin = margin(r = 10)),
+    # BOLDING THE NUMBERS (Axis Text)
+    axis.text.x = element_text(face = "bold", size = 10),
+    axis.text.y = element_text(face = "bold", size = 10),
+    # BOLD SOLID AXIS LINES
+    axis.line = element_line(color = "black", size = 1.1),
+    # Centering Titles
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5, size = 11),
+    # Cleaning background
+    panel.grid.minor = element_blank()
+  )
+
+# Save the plot
+ggsave("/Users/pefura-yone/Documents/FMSB/Articles/Stochastic_modeling_TB/calibration_plot_final_legend.png", 
+       plot = p, width = 9, height = 7, dpi = 300)
+
+# Display
+print(p)
+```
+
+```{r}
+################################################################################
+## FIGURE 2: MULTIPANEL CLINICAL VALIDATION (FIXED LABELS & HIGH CONTRAST)
+################################################################################
+
+# 1. Data Preparation
+test <- test %>%
+  mutate(
+    Outcome = factor(Status, labels = c("Survivor", "Dead")),
+    DTD_quartile = ntile(DTD_score, 4),
+    DTD_quartile = factor(DTD_quartile, 
+                          labels = c("Q1: High Risk", "Q2", "Q3", "Q4: Low Risk")),
+    HIV_Status = factor(VIH, labels = c("HIV Negative", "HIV Positive"))
+  )
+
+# High-contrast palette: Red, Orange, Blue, Green
+km_cols <- c("#d73027", "#f46d43", "#4575b4", "#1a9850")
+
+# --- Panel A: Distribution Separation ---
+p_dist <- ggplot(test, aes(x = Outcome, y = DTD_score, fill = Outcome)) +
+  geom_violin(alpha = 0.3, color = NA) +
+  geom_boxplot(width = 0.2, outlier.shape = 16, outlier.alpha = 0.2, color = "black", size = 0.6) +
+  scale_fill_manual(values = c("Survivor" = "#4575b4", "Dead" = "#d73027")) +
+  labs(title = "A. DtD separation by outcome", y = "Distance-to-Death (DtD)", x = "") +
+  theme_bw() + theme(legend.position = "none", axis.title.y = element_text(face="bold"))
+
+# --- Panel B: Model Granularity (BMI vs DtD) ---
+p_scatter <- ggplot(test, aes(x = BMI, y = DTD_score, color = HIV_Status)) +
+  geom_point(alpha = 0.3, size = 0.8) +
+  geom_smooth(method = "lm", formula = y ~ x, color = "black", linetype = "dashed", size = 0.7, se = FALSE) +
+  scale_color_manual(values = c("HIV Negative" = "#1a9850", "HIV Positive" = "#d73027")) +
+  labs(title = "B. BMI vs. DtD granularity", x = "Admission BMI (kg/m²)", y = "DtD score", color = "HIV Status") +
+  theme_bw() + theme(legend.position = "bottom", axis.title = element_text(face="bold"))
+
+# --- Panel C: Kaplan-Meier (FIXED Y-AXIS LABEL) ---
+fit_q <- survfit(Surv(Duration, Status) ~ DTD_quartile, data = test)
+p_km_obj <- ggsurvplot(fit_q, data = test, 
+                       fun = "pct", palette = km_cols, 
+                       ylim = c(70, 100), # Plot starts at 70%
+                       title = "C. Survival by DtD quartile",
+                       xlab = "Time (days)", ylab = "Survival (%)",
+                       legend.title = "Risk stratum",
+                       legend.labs = c("Q1", "Q2", "Q3", "Q4"),
+                       ggtheme = theme_bw())
+
+p_km <- p_km_obj$plot + 
+  # Placement at y = 75 ensures it shows up within the 70-100 range
+  annotate("text", x = 10, y = 75, label = "Log-rank p < 0.0001", 
+           hjust = 0, size = 3.5, fontface = "bold.italic") +
+  theme(axis.title = element_text(face="bold"))
+
+# --- Panel D: Mortality Gradient ---
+mort_data <- data.frame(Quartile = c("Q1", "Q2", "Q3", "Q4"), Rate = c(16.7, 7.5, 1.8, 1.6))
+p_grad <- ggplot(mort_data, aes(x = Quartile, y = Rate, fill = Quartile)) +
+  geom_bar(stat = "identity", width = 0.6, color = "black", size = 0.3) +
+  scale_fill_manual(values = km_cols) + 
+  geom_text(aes(label = paste0(Rate, "%")), vjust = -0.5, fontface = "bold", size = 3.5) +
+  labs(title = "D. Mortality gradient", x = "DtD quartile", y = "Mortality rate (%)") +
+  theme_bw() + theme(legend.position = "none", axis.title = element_text(face="bold")) +
+  ylim(0, 22)
+
+# --- Final Assembly ---
+final_fig2 <- (p_dist | p_scatter) / (p_km | p_grad) + plot_layout(heights = c(1, 1))
+
+ggsave("Figure2_DtD_Validation_Final.png", plot = final_fig2, width = 10, height = 9, dpi = 300)
+print(final_fig2)
+```
